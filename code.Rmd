@@ -1,0 +1,235 @@
+---
+title: "STAT432_FinalProject"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Data
+```{r}
+set.seed(1)
+
+brca = read.csv("brca_data_w_subtypes.csv")
+
+PR_Status = brca['PR.Status']
+ER_Status = brca['ER.Status'] 
+HER2 = brca['HER2.Final.Status']
+HIST = brca['histological.type']
+
+brca_variables = subset(brca, select=-c(vital.status, PR.Status, ER.Status, HER2.Final.Status, histological.type))
+dim(brca_variables)
+```
+
+## Preprocess
+```{r}
+PR_Status[PR_Status == 'Positive'] = 1
+PR_Status[PR_Status == 'Negative'] = 0
+
+ER_Status[ER_Status == 'Positive'] = 1
+ER_Status[ER_Status == 'Negative'] = 0
+
+HER2[HER2 == 'Positive'] = 1
+HER2[HER2 == 'Negative'] = 0
+
+HIST[HIST == 'infiltrating lobular carcinoma'] = 1
+HIST[HIST == 'infiltrating ductal carcinoma'] = 0
+```
+
+## Modeling ```PR.Status```
+```{r}
+subset_brca_variables = brca_variables[(PR_Status == 0) | (PR_Status == 1),]
+subset_PR_Status = PR_Status[(PR_Status == 0) | (PR_Status == 1)]
+
+set.seed(1)
+# 75% of the sample size
+train_size <- floor(0.75 * nrow(subset_brca_variables))
+train_ind <- sample(seq_len(nrow(subset_brca_variables)), size = train_size)
+
+trainX <- subset_brca_variables[train_ind, ]
+trainY <- subset_PR_Status[train_ind]
+
+testX <- subset_brca_variables[-train_ind, ]
+testY <- subset_PR_Status[-train_ind]
+```
+
+### SVM
+```{r}
+library(e1071)
+set.seed(1)
+
+svm.fit <- svm(y=trainY, x = data.frame(trainX),
+               type='C-classification',
+               kernel='linear',scale=FALSE, cost = 1)
+
+estimations = predict(svm.fit, testX)
+
+# classification error
+mean(testY == estimations)
+
+# confusion table
+table(testY, estimations)
+```
+
+### SVM w/ cross-validation
+```{r}
+library(kernlab)
+library(caret)
+
+set.seed(1)
+
+options(warn=-1)
+svm2 <- train(y=as.factor(trainY), x = data.frame(trainX),
+              method = "svmLinear",
+              tuneGrid = expand.grid(C = c(0.01, 0.1, 0.5, 1)),
+              trControl = trainControl(method = "cv", number = 5))
+svm2
+```
+
+```{r}
+pred2 = predict(svm2, data.frame(testX))
+
+# confusion table
+table(testY, pred2)
+
+# testing data accuracy
+mean(testY == pred2)
+```
+
+### KNN
+```{r}
+control <- trainControl(method = "cv", number = 5)
+
+set.seed(1)
+
+knn.cvfit <- train(y = as.factor(trainY), x = trainX, method = "knn",
+                   tuneGrid = data.frame(k = seq(1, 10, 1)),
+                   trControl = control)
+knn.cvfit
+```
+
+```{r}
+plot(knn.cvfit$results$k, knn.cvfit$results$Accuracy,
+     xlab = "K", ylab = "Classification Error", type = "b",
+     pch = 19, col = "darkorange")
+```
+
+```{r}
+preds = predict(knn.cvfit, newdata=data.matrix(testX))
+
+mean(testY == preds)
+```
+
+
+
+## Modeling ```histological.type``` 
+```{r}
+set.seed(1)
+subset_brca_variables = brca_variables[(HIST == 0) | (HIST == 1),]
+subset_HIST_Status = HIST[(HIST == 0) | (HIST == 1)]
+# 75% of the sample size
+train_size <- floor(0.75 * nrow(subset_brca_variables))
+train_ind <- sample(seq_len(nrow(subset_brca_variables)), size = train_size)
+
+trainX <- subset_brca_variables[train_ind, ]
+trainY <- subset_HIST_Status[train_ind]
+
+testX <- subset_brca_variables[-train_ind, ]
+testY <- subset_HIST_Status[-train_ind]
+```
+
+### Logistic Regression
+```{r}
+library(glmnet)
+set.seed(1)
+
+cv_logistic.fit = cv.glmnet(x = data.matrix(trainX), 
+                            y = trainY, 
+                            nfolds = 5, 
+                            alpha = 0, 
+                            family = "binomial",
+                            type.measure = "auc")
+
+# report the best lambda value ("lambda.min")
+# cv_logistic.fit$lambda.min
+# coef(cv_logistic.fit, s = "lambda.min")
+
+preds = predict(cv_logistic.fit, data.matrix(testX), s ="lambda.min")
+
+library(ROCR)
+roc <- prediction(preds, testY)
+# this computes the area under the curve, AUC
+performance(roc, measure = "auc")@y.values[[1]]
+```
+
+### Random Forest
+```{r}
+library(rpart)
+library(caret)
+
+set.seed(1)
+
+# mtry: number of variables randomly sampled as candidates at each split
+tG = expand.grid(mtry = c(20,50,100,200,500,1000), min.node.size = c(1,5,7), splitrule = "gini")
+tC = trainControl(method = "cv", number = 5)
+randomforest.fit = train(y = trainY, 
+                         x = data.frame(trainX), 
+                         method = "ranger",
+                         num.trees = 300,
+                         respect.unordered.factors = "partition",
+                         tuneGrid = tG,
+                         trControl = tC)
+randomforest.fit
+```
+
+```{r}
+preds = predict(randomforest.fit, testX)
+
+library(ROCR)
+roc <- prediction(as.numeric(preds), as.numeric(testY))
+# this computes the area under the curve, AUC
+performance(roc, measure = "auc")@y.values[[1]]
+```
+
+
+## Variable Selection for All Outcomes
+```{r}
+set.seed(1)
+folds_idx = sample(1:3, 705, replace = TRUE)
+```
+
+```{r}
+eval_cv_auc <- function(X, Y, folds) {
+  aucs = rep(0, 3)
+  for(i in 1:3){
+    testIndexes <- which(folds==i,arr.ind=TRUE)
+    testX <- X[testIndexes, ]
+    testY <- Y[testIndexes]
+    trainX <- X[-testIndexes, ]
+    trainY <- Y[-testIndexes]
+    
+    rf = randomForest(x = trainX, y = as.factor(trainY), ntree=300, mtry=50, nodesize=5)
+    
+    preds = predict(rf, testX)
+    
+    roc <- prediction(as.numeric(preds), as.numeric(testY))
+    # this computes the area under the curve, AUC
+    aucs[i] = performance(roc, measure = "auc")@y.values[[1]]
+  }
+  return (mean(aucs))
+}
+```
+
+
+```{r}
+library(randomForest)
+
+subset_PR_variables = brca_variables[(PR_Status == 0) | (PR_Status == 1),]
+subset_PR_Status = PR_Status[(PR_Status == 0) | (PR_Status == 1)]
+PR_folds = folds_idx[(PR_Status == 0) | (PR_Status == 1)]
+
+eval_cv_auc(subset_PR_variables, subset_PR_Status, PR_folds)
+# importance(randomforest.fit)
+```
+
